@@ -1,0 +1,33 @@
+1. 为什么 thread_switch 只需要保存/恢复 callee-saved 寄存器（ra、sp、s0~s11），
+   而不需要保存 caller-saved 寄存器（a0~a7、t0~t6）？
+
+   thread_switch 在形式上是一次普通的函数调用（调用者是 thread_schedule）。按照 RISC-V
+   调用约定，caller-saved 寄存器的值本来就不保证跨函数调用存活：编译器在调用
+   thread_switch 之前，如果调用方在这些寄存器中持有跨调用的活跃值，编译器会自动把它们
+   保存到调用方自己的栈帧上（或改放到 callee-saved 寄存器中）。因此 thread_switch 无需
+   也不能保存它们。相反，callee-saved 寄存器（s0~s11）约定上必须跨函数调用保持不变，
+   而 thread_switch 返回后执行的是另一个线程，所以必须把 s0~s11 连同 ra、sp 一起保存到
+   旧线程的 context，再从新线程的 context 中恢复：ra 决定恢复后从哪里继续执行（ret 的
+   目标），sp 完成栈的切换。
+
+2. 为什么每个线程必须有自己的栈？thread_create 中为什么把 context.sp 设为线程自己栈的
+   栈顶、把 context.ra 设为 func？
+
+   线程在执行中会调用函数（如 printf、thread_yield），每次调用都会把返回地址、局部变量等
+   写进自己的栈。如果多个线程共用一个栈，线程 A 保存在栈上的返回地址和栈帧会被稍后上 CPU
+   的线程 B 覆盖，等 A 再次被调度回来时，栈上的内容已被破坏，程序必然崩溃，所以每个线程
+   必须有独立的栈，线程切换本质上就是通过恢复各自的 sp 来切换栈。
+   thread_create 把 context.sp 设为新线程自己栈的栈顶、context.ra 设为 func，相当于为新
+   线程"伪造"了一个 thread_switch 的调用帧：当该线程第一次被 thread_switch 选中恢复时，
+   ret 会跳转到 func，并且 func 在属于自己的栈上运行——不需要任何特判代码。
+
+3. barrier() 为什么需要 mutex + 条件变量？为什么由最后一个到达的线程调用 broadcast？
+
+   bstate.nthread（已到达的线程数）和 bstate.round（轮次）是多个线程共享的状态，必须用
+   mutex 保护，否则计数更新会因竞态丢失，round 的比较（assert(i == bstate.round)）也会
+   出错。先到达的线程把计数加一后发现自己不是最后一个，就调用 pthread_cond_wait：它会
+   原子地释放 mutex 并进入睡眠，避免"检查条件—睡眠"之间其他线程已完成这一轮而自己永久
+   错过唤醒（丢失唤醒问题）；被唤醒时 pthread_cond_wait 会先重新获得 mutex，然后线程才
+   返回。最后一个到达的线程把 round 加一、把计数清零，再调用 broadcast 一次性唤醒所有
+   等待者；由于整个操作在 mutex 保护下进行，等待者醒来时看到的已经是新一轮的状态，而
+   快速重新入场的线程会再次等待，不会提前通过 barrier。
