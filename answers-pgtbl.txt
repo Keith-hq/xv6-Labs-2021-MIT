@@ -1,0 +1,11 @@
+1. Other system calls such as uptime() could use the shared read-only page. The
+kernel would update a value in the page, and user code could read it without a
+trap. Simple read-only process data, such as cached parent pid or process size,
+could be exposed the same way if the kernel kept it current.
+
+2. The vmprint output is a three-level Sv39 page-table tree. The top-level and
+middle-level entries point to lower-level page-table pages; leaf entries map
+virtual pages to physical pages. Page 0 contains the init program text/data.
+Page 2 is the user stack. Page 1 is the invalid stack guard page, so user mode
+cannot read or write it. The third-to-last page is USYSCALL, a read-only page
+shared with the kernel that contains the process pid.
