@@ -1,0 +1,17 @@
+1. a0 through a7 contain the arguments to the function call. 13 is stored in a2.
+
+2. There are no calls to f in main because the compiler inlined f into main.
+There is one call to g.
+
+3. The address printed is 0x630.
+
+4. The value in ra just after the jalr to printf is 0x44, the address of the
+instruction following the call.
+
+5. The output is "He110 World". 57616 is 0xe110, so the %x prints e110. On
+little-endian RISC-V, storing 0x00646c72 in i puts the bytes for "rld\0" in
+memory. On a big-endian machine, i would need to be 0x726c6400 to produce the
+same string bytes in memory, and 57616 would not need to change.
+
+6. The value printed after "y=" is some unpredictable stack value, because
+printf expects a second argument but none was supplied.
