@@ -23,32 +23,53 @@
 #include "fs.h"
 #include "buf.h"
 
+// The buffer cache is a hash table of NBUCKET buckets, each with
+// its own lock and LRU list of buffers, so that concurrent lookups
+// of blocks that hash to different buckets don't contend for a
+// single lock.  At most one copy of each block is cached: lookup
+// and insertion for a block both happen under the lock of the
+// bucket that the block hashes to.
+#define NBUCKET 13
+
 struct {
-  struct spinlock lock;
+  struct spinlock eviction_lock;     // serializes eviction in bget
+  struct spinlock bucket_lock[NBUCKET];
   struct buf buf[NBUF];
 
   // Linked list of all buffers, through prev/next.
   // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
-  struct buf head;
+  // head[i].next is most recent, head[i].prev is least.
+  struct buf head[NBUCKET];
 } bcache;
+
+int
+bhash(uint blockno)
+{
+  return blockno % NBUCKET;
+}
 
 void
 binit(void)
 {
   struct buf *b;
 
-  initlock(&bcache.lock, "bcache");
+  initlock(&bcache.eviction_lock, "bcache");
 
-  // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
+  for(int i = 0; i < NBUCKET; i++) {
+    initlock(&bcache.bucket_lock[i], "bcache.bucket");
+    bcache.head[i].prev = &bcache.head[i];
+    bcache.head[i].next = &bcache.head[i];
+  }
+
+  // Create linked list of buffers, distributing them
+  // among the buckets.
   for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
+    int bucket = (b - bcache.buf) % NBUCKET;
+    b->next = bcache.head[bucket].next;
+    b->prev = &bcache.head[bucket];
     initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    bcache.head[bucket].next->prev = b;
+    bcache.head[bucket].next = b;
   }
 }
 
@@ -59,31 +80,82 @@ static struct buf*
 bget(uint dev, uint blockno)
 {
   struct buf *b;
+  int bucket = bhash(blockno);
 
-  acquire(&bcache.lock);
+  acquire(&bcache.bucket_lock[bucket]);
 
   // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+  for(b = bcache.head[bucket].next; b != &bcache.head[bucket]; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
-      release(&bcache.lock);
+      release(&bcache.bucket_lock[bucket]);
+      acquiresleep(&b->lock);
+      return b;
+    }
+  }
+  release(&bcache.bucket_lock[bucket]);
+
+  // Not cached.
+  // Recycle the least recently used (LRU) unused buffer.
+  // Serialize eviction: it may need to move a buffer from one
+  // bucket to another, taking two bucket locks.
+  acquire(&bcache.eviction_lock);
+  acquire(&bcache.bucket_lock[bucket]);
+
+  // Check again, maybe another process cached the block.
+  for(b = bcache.head[bucket].next; b != &bcache.head[bucket]; b = b->next){
+    if(b->dev == dev && b->blockno == blockno){
+      b->refcnt++;
+      release(&bcache.bucket_lock[bucket]);
+      release(&bcache.eviction_lock);
       acquiresleep(&b->lock);
       return b;
     }
   }
 
-  // Not cached.
-  // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
+  // Recycle the least recently used (LRU) unused buffer
+  // of this bucket.
+  for(b = bcache.head[bucket].prev; b != &bcache.head[bucket]; b = b->prev){
     if(b->refcnt == 0) {
       b->dev = dev;
       b->blockno = blockno;
       b->valid = 0;
       b->refcnt = 1;
-      release(&bcache.lock);
+      release(&bcache.bucket_lock[bucket]);
+      release(&bcache.eviction_lock);
       acquiresleep(&b->lock);
       return b;
     }
+  }
+
+  // All buffers of this bucket are in use.  Steal an unused
+  // buffer from another bucket and move it to this bucket.
+  for(int obucket = 0; obucket < NBUCKET; obucket++){
+    if(obucket == bucket)
+      continue;
+    acquire(&bcache.bucket_lock[obucket]);
+    for(b = bcache.head[obucket].prev; b != &bcache.head[obucket]; b = b->prev){
+      if(b->refcnt == 0) {
+        // Remove from the old bucket's list.
+        b->next->prev = b->prev;
+        b->prev->next = b->next;
+        release(&bcache.bucket_lock[obucket]);
+        // Insert at the head of the new bucket's list.
+        b->next = bcache.head[bucket].next;
+        b->prev = &bcache.head[bucket];
+        bcache.head[bucket].next->prev = b;
+        bcache.head[bucket].next = b;
+        b->dev = dev;
+        b->blockno = blockno;
+        b->valid = 0;
+        b->refcnt = 1;
+        release(&bcache.bucket_lock[bucket]);
+        release(&bcache.eviction_lock);
+        acquiresleep(&b->lock);
+        return b;
+      }
+    }
+    release(&bcache.bucket_lock[obucket]);
   }
   panic("bget: no buffers");
 }
@@ -121,33 +193,35 @@ brelse(struct buf *b)
 
   releasesleep(&b->lock);
 
-  acquire(&bcache.lock);
+  int bucket = bhash(b->blockno);
+  acquire(&bcache.bucket_lock[bucket]);
   b->refcnt--;
   if (b->refcnt == 0) {
     // no one is waiting for it.
     b->next->prev = b->prev;
     b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    b->next = bcache.head[bucket].next;
+    b->prev = &bcache.head[bucket];
+    bcache.head[bucket].next->prev = b;
+    bcache.head[bucket].next = b;
   }
-  
-  release(&bcache.lock);
+
+  release(&bcache.bucket_lock[bucket]);
 }
 
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
+  int bucket = bhash(b->blockno);
+  acquire(&bcache.bucket_lock[bucket]);
   b->refcnt++;
-  release(&bcache.lock);
+  release(&bcache.bucket_lock[bucket]);
 }
 
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+  int bucket = bhash(b->blockno);
+  acquire(&bcache.bucket_lock[bucket]);
   b->refcnt--;
-  release(&bcache.lock);
+  release(&bcache.bucket_lock[bucket]);
 }
-
 
