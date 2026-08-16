@@ -96,13 +96,41 @@ int
 e1000_transmit(struct mbuf *m)
 {
   //
-  // Your code here.
-  //
   // the mbuf contains an ethernet frame; program it into
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  
+  uint32 idx;
+  struct tx_desc *desc;
+
+  acquire(&e1000_lock);
+
+  // the E1000 expects the next packet at the descriptor
+  // indexed by E1000_TDT.
+  idx = regs[E1000_TDT];
+  desc = &tx_ring[idx];
+
+  // the ring is full: the E1000 hasn't finished the previous
+  // transmission request on this descriptor yet.
+  if (!(desc->status & E1000_TXD_STAT_DD)) {
+    release(&e1000_lock);
+    return -1;
+  }
+
+  // free the last mbuf that was transmitted from this descriptor.
+  if (tx_mbufs[idx])
+    mbuffree(tx_mbufs[idx]);
+
+  // program the descriptor.
+  desc->addr = (uint64) m->head;
+  desc->length = m->len;
+  desc->cmd = E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;
+  tx_mbufs[idx] = m;
+
+  // update the ring position.
+  regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
   return 0;
 }
 
@@ -110,11 +138,39 @@ static void
 e1000_recv(void)
 {
   //
-  // Your code here.
-  //
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  uint32 idx;
+  struct rx_desc *desc;
+  struct mbuf *m;
+
+  while (1) {
+    // the next received packet (if any) is at the descriptor
+    // just past E1000_RDT.
+    idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+    desc = &rx_ring[idx];
+
+    // no new packet.
+    if (!(desc->status & E1000_RXD_STAT_DD))
+      return;
+
+    // deliver the mbuf that the e1000 filled in to the network stack.
+    m = rx_mbufs[idx];
+    m->len = desc->length;
+    net_rx(m);
+
+    // allocate a fresh mbuf for the descriptor, so that the e1000
+    // finds an empty buffer when it reaches this slot again.
+    rx_mbufs[idx] = mbufalloc(0);
+    if (!rx_mbufs[idx])
+      panic("e1000_recv");
+    desc->addr = (uint64) rx_mbufs[idx]->head;
+    desc->status = 0;
+
+    // this descriptor has been processed; the e1000 may use it again.
+    regs[E1000_RDT] = idx;
+  }
 }
 
 void
