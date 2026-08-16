@@ -283,6 +283,35 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+// Create a symbolic link at path that refers to target.
+// target does not need to exist.
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+
+  // Store the target path in the symlink's data blocks.
+  if(writei(ip, 0, (uint64)target, 0, MAXPATH) != MAXPATH){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
+  return 0;
+}
+
 uint64
 sys_open(void)
 {
@@ -305,6 +334,35 @@ sys_open(void)
     }
   } else {
     if((ip = namei(path)) == 0){
+      end_op();
+      return -1;
+    }
+    ilock(ip);
+    if(ip->type == T_DIR && omode != O_RDONLY){
+      iunlockput(ip);
+      end_op();
+      return -1;
+    }
+  }
+
+  // Follow symbolic links recursively, unless O_NOFOLLOW was
+  // specified, in which case open the link itself.  Stop after
+  // following too many links, which also catches cycles.
+  int depth = 0;
+  while(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+    if(depth++ >= 10){
+      iunlockput(ip);
+      end_op();
+      return -1;
+    }
+    char target[MAXPATH];
+    if(readi(ip, 0, (uint64)target, 0, MAXPATH) != MAXPATH){
+      iunlockput(ip);
+      end_op();
+      return -1;
+    }
+    iunlockput(ip);
+    if((ip = namei(target)) == 0){
       end_op();
       return -1;
     }
