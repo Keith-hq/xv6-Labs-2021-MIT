@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -67,6 +68,43 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15){
+    // load (13) or store (15) page fault.  If the faulting address lies
+    // in one of the process's mmap-ed regions and the page is not mapped
+    // yet, allocate a physical page and read the corresponding part of
+    // the file into it.  Any other page fault is fatal, as before.
+    uint64 va = r_stval();
+    struct vma *vma = vma_find(p, va);
+    if(vma != 0 && walkaddr(p->pagetable, va) == 0){
+      char *mem = kalloc();
+      if(mem == 0){
+        p->killed = 1;
+      } else {
+        memset(mem, 0, PGSIZE);
+        uint off = vma->offset + (uint)PGROUNDDOWN(va - vma->addr);
+        ilock(vma->f->ip);
+        if(readi(vma->f->ip, 0, (uint64)mem, off, PGSIZE) < 0){
+          iunlock(vma->f->ip);
+          kfree(mem);
+          p->killed = 1;
+        } else {
+          iunlock(vma->f->ip);
+          int perm = PTE_U;
+          if(vma->prot & PROT_READ) perm |= PTE_R;
+          if(vma->prot & PROT_WRITE) perm |= PTE_W;
+          if(vma->prot & PROT_EXEC) perm |= PTE_X;
+          if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE,
+                      (uint64)mem, perm) != 0){
+            kfree(mem);
+            p->killed = 1;
+          }
+        }
+      }
+    } else {
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

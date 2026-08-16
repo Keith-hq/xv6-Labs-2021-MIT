@@ -301,6 +301,15 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // copy the parent's mmap regions; the pages themselves are filled
+  // in lazily by the child's page fault handler
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      np->vmas[i] = p->vmas[i];
+      filedup(np->vmas[i].f);
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -343,6 +352,18 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // Unmap the process's mmap-ed regions, as if munmap had been called
+  // on each of them; MAP_SHARED pages are written back to their files.
+  for(int i = 0; i < NVMA; i++){
+    struct vma *vma = &p->vmas[i];
+    if(vma->used){
+      munmap_range(p, vma, vma->addr, vma->length);
+      fileclose(vma->f);
+      vma->used = 0;
+      vma->f = 0;
+    }
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){

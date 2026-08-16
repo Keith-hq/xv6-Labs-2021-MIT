@@ -82,6 +82,19 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+// A virtual memory area (VMA), one mmap-ed region of the process's
+// address space.  Pages of a VMA are mapped lazily, in response to
+// page faults.
+struct vma {
+  int used;             // is this VMA in use?
+  uint64 addr;          // start virtual address (page-aligned)
+  uint64 length;        // length in bytes (page-aligned)
+  int prot;             // PROT_READ, PROT_WRITE, and/or PROT_EXEC
+  int flags;            // MAP_SHARED or MAP_PRIVATE
+  struct file *f;       // mapped file; the VMA holds a reference
+  uint offset;          // offset into the file where the mapping starts
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -105,4 +118,5 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  struct vma vmas[NVMA];       // mmap-ed regions
 };

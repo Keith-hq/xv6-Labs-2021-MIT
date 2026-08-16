@@ -108,6 +108,18 @@ exec(char *path, char **argv)
       last = s+1;
   safestrcpy(p->name, last, sizeof(p->name));
     
+  // Discard the old image's mmap regions, writing back MAP_SHARED
+  // pages that were modified; this must happen while p->pagetable
+  // is still the old page table.
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      munmap_range(p, &p->vmas[i], p->vmas[i].addr, p->vmas[i].length);
+      fileclose(p->vmas[i].f);
+      p->vmas[i].used = 0;
+      p->vmas[i].f = 0;
+    }
+  }
+
   // Commit to the user image.
   oldpagetable = p->pagetable;
   p->pagetable = pagetable;

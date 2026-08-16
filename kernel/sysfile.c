@@ -8,6 +8,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "param.h"
+#include "memlayout.h"
 #include "stat.h"
 #include "spinlock.h"
 #include "proc.h"
@@ -482,5 +483,127 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+// Find the VMA of p that contains va, or 0 if none.
+struct vma*
+vma_find(struct proc *p, uint64 va)
+{
+  int i;
+
+  for(i = 0; i < NVMA; i++){
+    struct vma *vma = &p->vmas[i];
+    if(vma->used && va >= vma->addr && va < vma->addr + vma->length)
+      return vma;
+  }
+  return 0;
+}
+
+// Unmap the pages of vma that lie in [addr, addr+length), first
+// writing MAP_SHARED pages back to the file.  Pages that were never
+// faulted in have no mapping and are simply skipped.
+void
+munmap_range(struct proc *p, struct vma *vma, uint64 addr, uint64 length)
+{
+  uint64 a;
+
+  for(a = addr; a < addr + length; a += PGSIZE){
+    uint64 pa = walkaddr(p->pagetable, a);
+    if(pa == 0)
+      continue;
+    if(vma->flags & MAP_SHARED){
+      // write the page back to the file
+      uint off = vma->offset + (uint)(a - vma->addr);
+      begin_op();
+      ilock(vma->f->ip);
+      if(writei(vma->f->ip, 0, pa, off, PGSIZE) != PGSIZE)
+        panic("munmap_range: writei");
+      iunlock(vma->f->ip);
+      end_op();
+    }
+    uvmunmap(p->pagetable, a, 1, 1);
+  }
+}
+
+uint64
+sys_mmap(void)
+{
+  int i;
+  uint64 addr;
+  int length, prot, flags, offset;
+  struct file *f;
+  struct proc *p = myproc();
+  struct vma *vma;
+
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0 ||
+     argint(2, &prot) < 0 || argint(3, &flags) < 0 ||
+     argfd(4, &i, &f) < 0 || argint(5, &offset) < 0)
+    return -1;
+
+  if(length <= 0 || offset < 0)
+    return -1;
+  // a MAP_SHARED mapping with PROT_WRITE requires a writable file
+  if((prot & PROT_WRITE) && flags == MAP_SHARED && f->writable == 0)
+    return -1;
+
+  for(vma = p->vmas; vma < &p->vmas[NVMA]; vma++)
+    if(!vma->used)
+      break;
+  if(vma == &p->vmas[NVMA])
+    return -1;
+
+  // Reserve address space just above the heap; the pages themselves
+  // are mapped lazily, in response to page faults.
+  uint64 start = PGROUNDUP(p->sz);
+  if(start + PGROUNDUP(length) >= TRAPFRAME)
+    return -1;
+  p->sz = start + PGROUNDUP(length);
+
+  vma->used = 1;
+  vma->addr = start;
+  vma->length = PGROUNDUP(length);
+  vma->prot = prot;
+  vma->flags = flags;
+  vma->f = filedup(f);    // keep the file alive even if the fd is closed
+  vma->offset = offset;
+
+  return vma->addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+  struct proc *p = myproc();
+  struct vma *vma;
+
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+
+  if(length <= 0 || addr % PGSIZE != 0)
+    return -1;
+  if((vma = vma_find(p, addr)) == 0)
+    return -1;
+  if(addr + length > vma->addr + vma->length)
+    return -1;
+
+  // write back MAP_SHARED pages, then unmap and free the pages
+  munmap_range(p, vma, addr, length);
+
+  // an munmap call covers the start, the end, or the whole region
+  // (but never a hole in the middle)
+  if(addr == vma->addr){
+    vma->addr += length;
+    vma->offset += length;
+  }
+  vma->length -= length;
+  if(vma->length == 0){
+    vma->used = 0;
+    fileclose(vma->f);
+    vma->f = 0;
+  }
+
   return 0;
 }
