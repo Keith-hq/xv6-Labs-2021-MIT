@@ -273,11 +273,12 @@ growproc(int n)
       return -1;
     }
   } else if(n < 0){
-    if((uint64)(-n) > sz) {
-      sz = 0;
-    } else {
-      sz = uvmdealloc(p->pagetable, sz, sz + n);
-    }
+    // n is an int; for huge negative n, sz + n wraps to a huge
+    // uint64 value and uvmdealloc() makes the call a no-op, which
+    // is what usertests' sbrk8000 expects.  A clamped sz must not
+    // be stored without freeing the mapped pages, or freewalk()
+    // will later hit leaf PTEs and panic("freewalk: leaf").
+    sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
   p->sz = sz;
   return 0;
