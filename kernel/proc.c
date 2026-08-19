@@ -260,16 +260,24 @@ userinit(void)
 int
 growproc(int n)
 {
-  uint sz;
+  uint64 sz;
   struct proc *p = myproc();
 
   sz = p->sz;
   if(n > 0){
+    if(sz + n < sz)
+      return -1;
+    if(sz + n >= TRAPFRAME)
+      return -1;
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
   } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+    if((uint64)(-n) > sz) {
+      sz = 0;
+    } else {
+      sz = uvmdealloc(p->pagetable, sz, sz + n);
+    }
   }
   p->sz = sz;
   return 0;

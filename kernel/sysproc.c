@@ -41,7 +41,7 @@ sys_wait(void)
 uint64
 sys_sbrk(void)
 {
-  int addr;
+  uint64 addr;
   int n;
 
   if(argint(0, &n) < 0)
@@ -55,12 +55,16 @@ sys_sbrk(void)
 uint64
 sys_sleep(void)
 {
+  static int backtrace_done;
   int n;
   uint ticks0;
 
   if(argint(0, &n) < 0)
     return -1;
-  backtrace();
+  if(backtrace_done == 0){
+    backtrace_done = 1;
+    backtrace();
+  }
   acquire(&tickslock);
   ticks0 = ticks;
   while(ticks - ticks0 < n){
