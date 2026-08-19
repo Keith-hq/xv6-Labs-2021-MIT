@@ -6,6 +6,7 @@
 #include "proc.h"
 #include "defs.h"
 #include "fcntl.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
