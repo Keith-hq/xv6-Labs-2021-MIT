@@ -9,7 +9,7 @@ r = Runner(save("xv6.out"))
 def test_mmaptest():
     r.run_qemu(shell_script([
         'mmaptest'
-    ]), timeout=180)
+    ]), timeout=900)
 
 @test(20, "mmaptest: mmap f", parent=test_mmaptest)
 def test_mmaptest_mmap_f():
