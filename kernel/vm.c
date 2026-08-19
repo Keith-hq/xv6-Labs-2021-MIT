@@ -249,6 +249,11 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
   if(newsz < oldsz)
     return oldsz;
 
+#ifdef LAB_PGTBL
+  if(newsz > USYSCALL)
+    return 0;
+#endif
+
   oldsz = PGROUNDUP(oldsz);
   for(a = oldsz; a < newsz; a += PGSIZE){
     mem = kalloc();

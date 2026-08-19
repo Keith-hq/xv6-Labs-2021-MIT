@@ -280,16 +280,26 @@ userinit(void)
 int
 growproc(int n)
 {
-  uint sz;
+  uint64 sz;
   struct proc *p = myproc();
 
   sz = p->sz;
   if(n > 0){
+    if(sz + n < sz)
+      return -1;
+#ifdef LAB_PGTBL
+    if(sz + n > USYSCALL)
+      return -1;
+#endif
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
   } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+    if((uint64)(-n) > sz) {
+      sz = 0;
+    } else {
+      sz = uvmdealloc(p->pagetable, sz, sz + n);
+    }
   }
   p->sz = sz;
   return 0;
