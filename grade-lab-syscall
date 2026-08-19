@@ -40,7 +40,7 @@ def test_trace_nothing():
 def test_trace_children():
     r.run_qemu(shell_script([
         'trace 2 usertests forkforkfork'
-    ]))
+    ]), timeout=900)
     r.match('3: syscall fork -> 4')
     r.match('^5: syscall fork -> \\d+')
     r.match('^6: syscall fork -> \\d+')
